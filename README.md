@@ -20,8 +20,8 @@ A self-hosted [Ghost](https://ghost.org/) blog running in Docker, with a product
 
 ## Overview
 
-| | |
-|---|---|
+| Property | Value |
+| --- | --- |
 | **Platform** | [Ghost 5](https://ghost.org/) on Alpine Linux |
 | **Database** | MySQL 8.0 (production) / SQLite (local testing) |
 | **Registry** | Docker Hub |
@@ -31,7 +31,7 @@ A self-hosted [Ghost](https://ghost.org/) blog running in Docker, with a product
 
 ## Project Structure
 
-```
+```text
 atechbroe-blog/
 ├── Dockerfile                        # Production-hardened Ghost image
 ├── docker-compose.yml                # Ghost + MySQL stack
@@ -66,21 +66,21 @@ docker run -d \
   ghost:5-alpine
 ```
 
-Open **http://localhost:2368** in your browser.
-Admin panel: **http://localhost:2368/ghost**
+Open `http://localhost:2368` in your browser.
+Admin panel: `http://localhost:2368/ghost`
 
 ---
 
 ## Production Setup (MySQL)
 
-**1. Clone the repo**
+### 1. Clone the repo
 
 ```sh
 git clone https://github.com/<your-username>/atechbroe-blog.git
 cd atechbroe-blog
 ```
 
-**2. Create your `.env` file**
+### 2. Create your `.env` file
 
 ```sh
 cp .env.example .env   # or create it manually
@@ -91,7 +91,7 @@ GHOST_DB_PASSWORD=your_strong_password_here
 MYSQL_ROOT_PASSWORD=your_strong_root_password_here
 ```
 
-**3. Start the stack**
+### 3. Start the stack
 
 ```sh
 docker compose up -d
@@ -103,7 +103,7 @@ Ghost waits for MySQL to pass its health check before starting. Track progress w
 docker compose logs -f ghost
 ```
 
-**4. Stop the stack**
+### 4. Stop the stack
 
 ```sh
 docker compose down
@@ -116,7 +116,7 @@ Data is persisted in named volumes (`ghost-content`, `ghost-db`) and survives re
 ## Environment Variables
 
 | Variable | Service | Description |
-|---|---|---|
+| --- | --- | --- |
 | `url` | ghost | Public URL of the blog |
 | `database__client` | ghost | `mysql` or `sqlite3` |
 | `database__connection__host` | ghost | Database hostname (use `db` with Compose) |
@@ -135,7 +135,7 @@ Data is persisted in named volumes (`ghost-content`, `ghost-db`) and survives re
 The `Dockerfile` is built on the official `ghost:5-alpine` image with the following hardening:
 
 | Feature | Detail |
-|---|---|
+| --- | --- |
 | Non-root user | Runs as `node` — explicitly declared |
 | Health check | `wget` polls `localhost:2368` every 30s (90s start period) |
 | Named volume | `/var/lib/ghost/content` declared for data persistence |
@@ -164,7 +164,7 @@ docker run \
 
 The pipeline defined in `.github/workflows/docker-build.yml` runs on every push and pull request to `main`.
 
-```
+```text
 push to main / PR open
         │
         ▼
@@ -192,14 +192,14 @@ push to main / PR open
 Add these under **Settings → Secrets and variables → Actions**:
 
 | Secret | Description |
-|---|---|
+| --- | --- |
 | `DOCKERHUB_USERNAME` | Your Docker Hub username |
 | `DOCKERHUB_TOKEN` | Docker Hub access token (not your password) — create at hub.docker.com → Account Settings → Personal Access Tokens |
 
-### Tagging strategy
+### Tagging Strategy
 
 | Event | Tags produced |
-|---|---|
+| --- | --- |
 | Push to `main` | `:main`, `:sha-<commit>` |
 | Push tag `v1.2.3` | `:1.2.3`, `:1.2`, `:sha-<commit>` |
 | Pull request | Build & test only, no publish |
@@ -208,12 +208,14 @@ Add these under **Settings → Secrets and variables → Actions**:
 
 ## Security Notes
 
-- **Secrets** — never commit `.env` or any file containing passwords. `.gitignore` should exclude it.
+- **Secrets** — never commit `.env` or any file containing passwords. `.gitignore` excludes it.
 - **Image pinning** — replace `ghost:5-alpine` with a specific digest in production:
+
   ```sh
   docker pull ghost:5-alpine
   docker inspect ghost:5-alpine --format '{{index .RepoDigests 0}}'
   # → ghost:5-alpine@sha256:<digest>
   ```
+
 - **CVE scanning** — run `docker scout cves ghost:5-alpine` periodically and rebuild when patches are available.
 - **Database passwords** — use a password manager to generate strong, unique values for `GHOST_DB_PASSWORD` and `MYSQL_ROOT_PASSWORD`.
