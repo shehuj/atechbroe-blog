@@ -16,8 +16,10 @@ LABEL org.opencontainers.image.title="atechbroe-blog" \
 # Production mode: disables debug logging, enables caching, hardens defaults
 ENV NODE_ENV=production
 
-# Ghost's official image already drops to the 'node' user.
-# Re-declaring prevents accidental root escalation in derived images.
+# Upgrade Alpine system packages to patch known CVEs (e.g. golang net/url, archive/zip,
+# crypto/x509). Must run as root; we drop back to node immediately after.
+USER root
+RUN apk upgrade --no-cache
 USER node
 
 # Health check: start-period accounts for Ghost boot (DB migrations, asset compilation)
