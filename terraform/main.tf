@@ -50,12 +50,12 @@ resource "aws_instance" "ghost" {
   iam_instance_profile   = aws_iam_instance_profile.ghost.name
 
   user_data = templatefile("${path.module}/userdata.sh", {
-    ghost_image  = var.ghost_image
-    ghost_url    = var.ghost_url
-    secret_arn   = aws_secretsmanager_secret.ghost_db.arn
-    aws_region   = var.aws_region
-    log_group    = "/ghost-blog/${var.environment}"
-    environment  = var.environment
+    ghost_image = var.ghost_image
+    ghost_url   = var.ghost_url
+    secret_arn  = aws_secretsmanager_secret.ghost_db.arn
+    aws_region  = var.aws_region
+    log_group   = "/ghost-blog/${var.environment}"
+    environment = var.environment
   })
 
   # Replace instance (not update in-place) when user_data changes
