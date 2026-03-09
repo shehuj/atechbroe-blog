@@ -206,3 +206,12 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Terraform
+terraform/.terraform/
+terraform/terraform.tfvars
+terraform/tfplan
+terraform/plan.txt
+terraform/*.tfstate
+terraform/*.tfstate.backup
+terraform/.terraform.lock.hcl
