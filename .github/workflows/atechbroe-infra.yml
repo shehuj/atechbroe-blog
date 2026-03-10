@@ -3,11 +3,22 @@ name: Terraform — Deploy Ghost to EC2
 on:
   push:
     branches: ["main", "dev"]
-    paths: ["terraform/**"]
+    paths:
+      - "terraform/**"
+      - ".github/workflows/atechbroe-infra.yml"
   pull_request:
     branches: ["main", "dev"]
-    paths: ["terraform/**"]
-  workflow_dispatch: 
+    paths:
+      - "terraform/**"
+      - ".github/workflows/atechbroe-infra.yml"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Run plan only, or plan and apply"
+        required: false
+        default: "plan"
+        type: choice
+        options: ["plan", "apply"]
 
 concurrency:
   group: terraform-${{ github.ref }}
@@ -128,9 +139,10 @@ jobs:
     timeout-minutes: 30
     needs: plan
     if: |
-      github.event_name != 'pull_request' &&
       github.ref == 'refs/heads/main' &&
-      needs.plan.outputs.plan_exit_code != '0'
+      github.event_name != 'pull_request' &&
+      (needs.plan.outputs.plan_exit_code != '0' ||
+       (github.event_name == 'workflow_dispatch' && inputs.action == 'apply'))
 
     environment:
       name: production
