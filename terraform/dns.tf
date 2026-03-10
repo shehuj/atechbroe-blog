@@ -5,21 +5,29 @@ resource "aws_route53_zone" "main" {
   tags = { Name = "jenom.com" }
 }
 
-# ── A records — root + www ─────────────────────────────────────────────────────
+# ── A records — root + www → ALB (ALIAS) ──────────────────────────────────────
 resource "aws_route53_record" "root" {
   zone_id = aws_route53_zone.main.zone_id
   name    = "jenom.com"
   type    = "A"
-  ttl     = 300
-  records = [aws_eip.ghost.public_ip]
+
+  alias {
+    name                   = aws_lb.ghost.dns_name
+    zone_id                = aws_lb.ghost.zone_id
+    evaluate_target_health = true
+  }
 }
 
 resource "aws_route53_record" "www" {
   zone_id = aws_route53_zone.main.zone_id
   name    = "www.jenom.com"
   type    = "A"
-  ttl     = 300
-  records = [aws_eip.ghost.public_ip]
+
+  alias {
+    name                   = aws_lb.ghost.dns_name
+    zone_id                = aws_lb.ghost.zone_id
+    evaluate_target_health = true
+  }
 }
 
 # ── CAA — restrict SSL issuance to Let's Encrypt only ─────────────────────────

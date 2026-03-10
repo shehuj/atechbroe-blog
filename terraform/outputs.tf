@@ -3,8 +3,13 @@ output "instance_id" {
   value       = aws_instance.ghost.id
 }
 
-output "public_ip" {
-  description = "Elastic IP — point your DNS A record here"
+output "alb_dns_name" {
+  description = "ALB DNS name — Route 53 ALIAS records point here automatically"
+  value       = aws_lb.ghost.dns_name
+}
+
+output "instance_ip" {
+  description = "EC2 Elastic IP — for SSM access and troubleshooting (not used for DNS)"
   value       = aws_eip.ghost.public_ip
 }
 
