@@ -1,4 +1,6 @@
 # ── Data sources ──────────────────────────────────────────────────────────────
+data "aws_caller_identity" "current" {}
+
 data "aws_vpc" "default" {
   default = true
 }
@@ -37,7 +39,7 @@ data "aws_ami" "al2023" {
 resource "aws_cloudwatch_log_group" "ghost" {
   name              = "/ghost-blog/${var.environment}"
   retention_in_days = 30
-  kms_key_id        = aws_kms_key.secrets.arn
+  kms_key_id        = aws_kms_key.logs.arn
 }
 
 # ── EC2 Instance ──────────────────────────────────────────────────────────────
