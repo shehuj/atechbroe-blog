@@ -63,7 +63,7 @@ mount -a
 echo "Data volume mounted at /opt/ghost"
 
 # ── 4. Directory structure ────────────────────────────────────────────────────
-mkdir -p /opt/ghost/{content,mysql,nginx/conf.d,certbot/{conf,www,logs}}
+mkdir -p /opt/ghost/{content,mysql,nginx/conf.d}
 chown -R ec2-user:docker /opt/ghost
 chmod 750 /opt/ghost
 
@@ -93,19 +93,14 @@ chmod 600 /opt/ghost/.env
 unset DB_PASSWORD DB_ROOT_PASSWORD SECRET_JSON
 
 # ── 6. Nginx reverse proxy config ────────────────────────────────────────────
-# HTTP only initially. After DNS is live, run:
-#   docker compose -f /opt/ghost/docker-compose.yml run --rm certbot \
-#     certonly --webroot -w /var/www/certbot -d yourdomain.com --email you@email.com --agree-tos
-# Then update this config and reload Nginx (see README for full SSL setup).
+# TLS is terminated at the ALB (ACM certificate). Nginx receives plain HTTP
+# from the ALB and proxies to Ghost on port 2368.
+# X-Forwarded-Proto is set by the ALB and forwarded to Ghost so Ghost knows
+# the original request was HTTPS.
 cat > /opt/ghost/nginx/conf.d/ghost.conf << 'NGINX'
 server {
     listen 80;
     server_name _;
-
-    # ACME challenge — required for Let's Encrypt cert issuance
-    location /.well-known/acme-challenge/ {
-        root /var/www/certbot;
-    }
 
     location / {
         proxy_pass         http://ghost:2368;
@@ -113,7 +108,7 @@ server {
         proxy_set_header   Host              $host;
         proxy_set_header   X-Real-IP         $remote_addr;
         proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
-        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_set_header   X-Forwarded-Proto $http_x_forwarded_proto;
         proxy_read_timeout 90s;
         client_max_body_size 50m;
     }
@@ -180,11 +175,8 @@ services:
     restart: always
     ports:
       - "80:80"
-      - "443:443"
     volumes:
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
-      - ./certbot/conf:/etc/letsencrypt:ro
-      - ./certbot/www:/var/www/certbot:ro
     networks:
       - ghost-net
     depends_on:
@@ -195,16 +187,6 @@ services:
         awslogs-region: $${AWS_REGION}
         awslogs-group: $${LOG_GROUP}
         awslogs-stream: nginx
-
-  certbot:
-    image: certbot/certbot:latest
-    volumes:
-      - ./certbot/conf:/etc/letsencrypt
-      - ./certbot/www:/var/www/certbot
-      - ./certbot/logs:/var/log/letsencrypt
-    # Auto-renews every 12 hours
-    entrypoint: /bin/sh -c "while true; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 43200; done"
-    restart: always
 
 networks:
   ghost-net:
@@ -240,9 +222,6 @@ systemctl enable --now ghost
 
 echo "=== Bootstrap complete — $(date -u) ==="
 echo "Ghost starting at ${ghost_url}"
+echo "TLS is terminated at the ALB (ACM certificate) — no local cert setup required."
 echo "Check status: docker compose -f /opt/ghost/docker-compose.yml ps"
 echo "View logs:    journalctl -u ghost -f"
-echo ""
-echo "After DNS is pointed to this instance, run SSL setup:"
-echo "  sudo docker compose -f /opt/ghost/docker-compose.yml run --rm certbot \\"
-echo "    certonly --webroot -w /var/www/certbot -d <your-domain> --email <your-email> --agree-tos"

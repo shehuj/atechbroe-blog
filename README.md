@@ -12,7 +12,7 @@ A self-hosted [Ghost 6](https://ghost.org/) blog deployed to AWS EC2 via Docker,
 - [Local Development](#local-development)
 - [Infrastructure (Terraform)](#infrastructure-terraform)
 - [CI/CD Pipeline](#cicd-pipeline)
-- [SSL / TLS Setup](#ssl--tls-setup)
+- [SSL / TLS](#ssl--tls)
 - [DNS Management](#dns-management)
 - [GitHub Secrets](#github-secrets)
 - [Operations](#operations)
@@ -28,7 +28,8 @@ A self-hosted [Ghost 6](https://ghost.org/) blog deployed to AWS EC2 via Docker,
 | **Image base** | `ghost:6.14-alpine` |
 | **Database** | MySQL 8.0 (production) / SQLite (local testing) |
 | **Registry** | Docker Hub |
-| **Hosting** | AWS EC2 (Amazon Linux 2023) |
+| **Hosting** | AWS EC2 (Amazon Linux 2023) behind ALB |
+| **TLS** | AWS ACM certificate (auto-renewed) |
 | **Infra-as-Code** | Terraform ≥ 1.7 |
 | **CI/CD** | GitHub Actions |
 | **DNS** | AWS Route 53 (`jenom.com`) |
@@ -51,10 +52,12 @@ atechbroe-blog/
 │   ├── variables.tf                    # Input variable declarations
 │   ├── terraform.tfvars.example        # Copy → terraform.tfvars for local runs
 │   ├── main.tf                         # EC2, EBS, EIP, CloudWatch
-│   ├── security.tf                     # KMS, Security Group, IAM role
+│   ├── security.tf                     # KMS, Security Groups, IAM role
 │   ├── secrets.tf                      # Secrets Manager (DB credentials)
-│   ├── dns.tf                          # Route 53 hosted zone + A + CAA records
-│   ├── outputs.tf                      # Instance ID, EIP, SSM connect command
+│   ├── acm.tf                          # ACM certificate + DNS validation
+│   ├── alb.tf                          # ALB, target group, listeners
+│   ├── dns.tf                          # Route 53 hosted zone + ALIAS + CAA records
+│   ├── outputs.tf                      # Instance ID, ALB DNS, SSM connect command
 │   └── scripts/
 │       └── userdata.sh                 # EC2 bootstrap: Docker, Ghost stack, systemd
 │
@@ -142,25 +145,29 @@ docker build -t atechbroe-blog .
 ### AWS architecture
 
 ```text
-                ┌──────────────────────────────────┐
-                │           AWS Account            │
-                │                                  │
-  Internet ────▶│  Route 53 (jenom.com)        │
-                │       │ A record → EIP           │
-                │       ▼                          │
-                │  Elastic IP ──▶ EC2 (AL2023)     │
-                │                 ├── Nginx :80/443│
-                │                 ├── Ghost :2368  │
-                │                 ├── MySQL :3306  │
-                │                 └── Certbot      │
-                │                                  │
-                │  EBS root (gp3, encrypted, KMS)  │
-                │  EBS data (xfs, prevent_destroy) │
-                │                                  │
-                │  Secrets Manager ── DB passwords  │
-                │  CloudWatch ──── container logs  │
-                │  SSM Session Manager ── no SSH   │
-                └──────────────────────────────────┘
+                ┌──────────────────────────────────────┐
+                │            AWS Account               │
+                │                                      │
+  Internet ────▶│  Route 53 (jenom.com)                │
+                │       │ ALIAS → ALB                  │
+                │       ▼                              │
+                │  ALB (HTTPS :443, ACM cert)          │
+                │   ├── HTTP :80 → redirect to HTTPS   │
+                │   └── HTTPS :443 → EC2 :80           │
+                │       ▼                              │
+                │  EC2 (AL2023)                        │
+                │   ├── Nginx :80 (proxy to Ghost)     │
+                │   ├── Ghost :2368                    │
+                │   └── MySQL :3306                    │
+                │                                      │
+                │  ACM — auto-renewed TLS certificate  │
+                │  EBS root (gp3, encrypted, KMS)      │
+                │  EBS data (xfs, prevent_destroy)     │
+                │                                      │
+                │  Secrets Manager ── DB passwords     │
+                │  CloudWatch ──── container logs      │
+                │  SSM Session Manager ── no SSH       │
+                └──────────────────────────────────────┘
 ```
 
 ### Local `terraform init` and deploy
@@ -184,8 +191,11 @@ terraform apply
 | Feature | Implementation |
 | --- | --- |
 | No SSH required | AWS SSM Session Manager; SSH port closed by default |
+| TLS via ACM | ALB terminates HTTPS using ACM certificate; auto-renewed by AWS |
+| EC2 not internet-exposed | Security group allows port 80 from ALB only; 443 never reaches EC2 |
+| HTTP → HTTPS redirect | ALB listener redirects all port 80 traffic to HTTPS 301 |
 | IMDSv2 enforced | Blocks SSRF attacks against instance metadata |
-| KMS CMK encryption | EBS volumes + Secrets Manager use customer-managed keys |
+| KMS CMK encryption | EBS volumes + Secrets Manager + CloudWatch logs use customer-managed keys |
 | DB credentials | Stored in Secrets Manager — never in userdata or env files |
 | IAM least privilege | EC2 role scoped to SSM, CloudWatch, KMS, and its own secret |
 | Data volume survives replace | `prevent_destroy = true` on separate EBS volume |
@@ -277,34 +287,23 @@ Actions → DNS — Update jenom.com → Run workflow
 
 ---
 
-## SSL / TLS Setup
+## SSL / TLS
 
-The EC2 instance boots with HTTP-only Nginx. After DNS is pointed at the Elastic IP, run the one-time certificate issuance via SSM:
+TLS is handled entirely by the **ALB + AWS Certificate Manager**. No manual certificate setup is required.
 
-```sh
-# Connect to the instance
-aws ssm start-session --target <instance-id> --region us-east-1
-
-# Issue the certificate
-sudo docker compose -f /opt/ghost/docker-compose.yml run --rm certbot \
-  certonly --webroot -w /var/www/certbot \
-  -d jenom.com -d www.jenom.com \
-  --email you@example.com --agree-tos
-```
-
-Then update `/opt/ghost/nginx/conf.d/ghost.conf` to add the HTTPS server block and reload Nginx:
-
-```sh
-sudo docker compose -f /opt/ghost/docker-compose.yml exec nginx nginx -s reload
-```
-
-Certbot auto-renews every 12 hours via its built-in loop.
+- Terraform provisions the ACM certificate for `jenom.com` and `www.jenom.com`
+- ACM validates ownership automatically via DNS CNAME records in Route 53
+- The ALB HTTPS listener uses the certificate and terminates TLS before traffic reaches the EC2 instance
+- AWS automatically renews the certificate before expiry — no cron job or Certbot needed
+- The EC2 security group only allows port 80 from the ALB; port 443 never reaches the instance
 
 ---
 
 ## DNS Management
 
-Run the `atechbroe-dns.yml` workflow manually from **Actions → DNS — Update jenom.com → Run workflow** whenever the server IP changes (e.g. after EC2 replacement).
+Route 53 ALIAS records point automatically to the ALB — they update when the ALB scales or changes IPs with no manual intervention needed.
+
+Run the `atechbroe-dns.yml` workflow manually from **Actions → DNS — Update jenom.com → Run workflow** if you ever need to force-update the ALIAS target (e.g. after switching to a new ALB).
 
 | Input | Description |
 | --- | --- |
@@ -312,7 +311,7 @@ Run the `atechbroe-dns.yml` workflow manually from **Actions → DNS — Update 
 | `ttl` | DNS TTL in seconds (`60` / `300` / `3600`). Use `60` during migrations. |
 | `dry_run` | Preview changes without applying. |
 
-The workflow validates the IP, upserts both `jenom.com` and `www.jenom.com` A records, waits for Route 53 propagation, and verifies resolution from Google, Cloudflare, and Quad9.
+The workflow validates the IP, upserts both `jenom.com` and `www.jenom.com` records, waits for Route 53 propagation, and verifies resolution from Google, Cloudflare, and Quad9.
 
 ---
 
@@ -347,11 +346,11 @@ Go to **Settings → Secrets and variables → Actions** and add:
 | `AWS_SECRET_ACCESS_KEY` | Secret access key from the step above |
 | `AWS_REGION` | `us-east-1` |
 | `DYNAMOTBALE_TF` | DynamoDB table name for Terraform state locking |
-| `GHOST_URL` | `https://jenom.com` |
+| `GHOST_URL` | `https://www.jenom.com` |
 | `DOCKERHUB_USERNAME` | Docker Hub username |
 | `DOCKERHUB_TOKEN` | Docker Hub personal access token (not your password) |
-| `ROUTE53_ZONE_ID` | Route 53 hosted zone ID for `jenom.com` |
-| `SERVER_IP` | Current server Elastic IP (fallback for DNS workflow) |
+| `ROUTE53_ZONE_ID` | Route 53 hosted zone ID for `jenom.com` (from `terraform output zone_id`) |
+| `SERVER_IP` | EC2 Elastic IP (fallback for DNS workflow — from `terraform output instance_ip`) |
 
 ---
 
