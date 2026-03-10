@@ -154,7 +154,7 @@ jobs:
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: |
           terraform init \
-            -backend-config="bucket=${{ secrets.BACKEN_TF }}" \
+            -backend-config="bucket=${{ secrets.BACKEND_TF }}" \
             -backend-config="region=${{ secrets.AWS_REGION }}" \
             -backend-config="dynamodb_table=${{ secrets.DYNAMOTBALE_TF }}"
 
