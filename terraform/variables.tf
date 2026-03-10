@@ -19,11 +19,13 @@ variable "instance_type" {
 variable "ghost_url" {
   description = "Public URL of the Ghost blog including scheme, e.g. https://blog.example.com"
   type        = string
+  default     = "www.shehuj.com"
 }
 
 variable "ghost_image" {
   description = "Docker Hub image to run, e.g. youruser/atechbroe-blog:latest"
   type        = string
+  default     = "captaincloud01/atechbroe:main"
 }
 
 variable "allowed_ssh_cidr" {

@@ -49,7 +49,7 @@ resource "aws_instance" "ghost" {
   vpc_security_group_ids = [aws_security_group.ghost.id]
   iam_instance_profile   = aws_iam_instance_profile.ghost.name
 
-  user_data = templatefile("${path.module}/userdata.sh", {
+  user_data = templatefile("${path.module}/scripts/userdata.sh", {
     ghost_image = var.ghost_image
     ghost_url   = var.ghost_url
     secret_arn  = aws_secretsmanager_secret.ghost_db.arn
