@@ -1,13 +1,14 @@
 name: Deploy — Rolling Restart Ghost on EC2
 
 # Runs automatically after the Docker image is published to Docker Hub on main.
-# Can also be triggered manually (e.g. after a hotfix or config change).
+# Can also be triggered manually (e.g. after a hotfix, config change, or rollback).
 #
 # Pre-requisites (GitHub Secrets):
 #   AWS_ACCESS_KEY_ID     — IAM user with ssm:SendCommand + ec2:DescribeInstances
 #   AWS_SECRET_ACCESS_KEY — corresponding secret key
 #   AWS_REGION            — e.g. us-east-1
-#   GHOST_URL             — e.g. https://atechbroe.com (used for health check)
+#   GHOST_URL             — e.g. https://www.jenom.com (used for health check)
+#   DOCKERHUB_USERNAME    — used to resolve the full image name
 
 on:
   workflow_run:
@@ -21,6 +22,11 @@ on:
         required: false
         default: false
         type: boolean
+      rollback_tag:
+        description: "Image tag to deploy (leave blank for :latest). e.g. sha-abc1234 or 6.14.0"
+        required: false
+        default: ""
+        type: string
 
 # Never run two deploys at the same time
 concurrency:
@@ -44,7 +50,7 @@ jobs:
 
     environment:
       name: production
-      url: https://atechbroe.com
+      url: https://www.jenom.com
 
     steps:
 
@@ -56,7 +62,22 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region:            ${{ secrets.AWS_REGION }}
 
-      # ── 2. Find the running EC2 instance by tag ──────────────────────────────
+      # ── 2. Resolve image tag ──────────────────────────────────────────────────
+      #    Default: :latest (set by publish job on main)
+      #    Rollback: any tag passed via workflow_dispatch input
+      - name: Resolve target image tag
+        id: image
+        run: |
+          TAG="${{ inputs.rollback_tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="latest"
+          fi
+          IMAGE="${{ secrets.DOCKERHUB_USERNAME }}/atechbroe-blog:${TAG}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "Target image: $IMAGE"
+
+      # ── 3. Find the running EC2 instance by tag ──────────────────────────────
       - name: Discover EC2 instance
         id: instance
         run: |
@@ -75,24 +96,129 @@ jobs:
           echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
           echo "Found instance: $INSTANCE_ID"
 
-      # ── 3. Restart Ghost via SSM (pulls new image on start) ─────────────────
-      #    The systemd ghost.service has ExecStartPre=docker compose pull,
-      #    so restarting it automatically picks up the latest Docker Hub image.
-      - name: Restart Ghost service via SSM
+      # ── 4. Deploy via SSM — mirrors CI test approach on production stack ──────
+      #    On-instance steps (running as root via SSM):
+      #      a) Update the image tag in the Ghost .env file
+      #      b) Pull the new image explicitly (fails fast if tag missing)
+      #      c) Rolling restart: bring up ghost only, no-deps, remove orphans
+      #      d) HEALTHCHECK loop — mirrors CI "Wait for healthy status"
+      #      e) Assert running user is node — mirrors CI "Verify container user"
+      #      f) HTTP 200 on localhost:2368 — mirrors CI "Verify HTTP 200"
+      #         (internal check; external check via GHOST_URL happens in step 6)
+      - name: Build SSM deployment script
+        id: script
+        env:
+          TARGET_IMAGE: ${{ steps.image.outputs.image }}
+        run: |
+          # Write the remote script to a file to avoid quoting hell
+          cat > /tmp/deploy.sh << 'SCRIPT'
+          set -euo pipefail
+
+          IMAGE="__TARGET_IMAGE__"
+          COMPOSE_FILE="/opt/ghost/docker-compose.yml"
+          ENV_FILE="/opt/ghost/.env"
+
+          echo "=== Deployment target: $IMAGE ==="
+
+          # ── a) Update GHOST_IMAGE in .env ────────────────────────────────────
+          if [ -f "$ENV_FILE" ]; then
+            if grep -q "^GHOST_IMAGE=" "$ENV_FILE"; then
+              sed -i "s|^GHOST_IMAGE=.*|GHOST_IMAGE=$IMAGE|" "$ENV_FILE"
+            else
+              echo "GHOST_IMAGE=$IMAGE" >> "$ENV_FILE"
+            fi
+            echo "Updated GHOST_IMAGE in $ENV_FILE"
+          else
+            echo "WARNING: $ENV_FILE not found — systemd unit may hardcode the image." >&2
+          fi
+
+          # ── b) Pull image ─────────────────────────────────────────────────────
+          echo "=== Pulling image ==="
+          docker compose -f "$COMPOSE_FILE" pull ghost
+
+          # ── c) Rolling restart (ghost only, keep MySQL/Nginx running) ─────────
+          echo "=== Starting rolling restart ==="
+          docker compose -f "$COMPOSE_FILE" up -d \
+            --no-deps \
+            --remove-orphans \
+            ghost
+
+          # ── d) HEALTHCHECK loop (mirrors CI "Wait for healthy status") ────────
+          echo "=== Waiting for Ghost HEALTHCHECK ==="
+          for i in $(seq 1 30); do
+            STATUS=$(docker inspect --format='{{.State.Health.Status}}' ghost 2>/dev/null || echo "starting")
+            echo "[$i/30] $STATUS"
+            if [ "$STATUS" = "healthy" ]; then
+              echo "Ghost container is healthy."
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "ERROR: Ghost failed health check after 150 s" >&2
+              docker logs --tail 50 ghost >&2
+              exit 1
+            fi
+            sleep 5
+          done
+
+          # ── e) Assert running user is node (mirrors CI "Verify container user") ─
+          echo "=== Verifying container user ==="
+          RUN_USER=$(docker exec ghost whoami 2>/dev/null || echo "unknown")
+          echo "Container is running as: $RUN_USER"
+          if [ "$RUN_USER" != "node" ]; then
+            echo "ERROR: expected user 'node', got '$RUN_USER'" >&2
+            exit 1
+          fi
+
+          # ── f) HTTP 200 on Ghost direct port (mirrors CI "Verify HTTP 200") ───
+          echo "=== Internal HTTP check on :2368 ==="
+          for i in $(seq 1 6); do
+            CODE=$(curl -sf -o /dev/null -w "%{http_code}" \
+              --max-time 10 http://localhost:2368/ 2>/dev/null || echo "000")
+            echo "[$i/6] HTTP $CODE"
+            if [ "$CODE" = "200" ]; then
+              echo "Ghost responding HTTP 200 on :2368."
+              break
+            fi
+            if [ "$i" -eq 6 ]; then
+              echo "ERROR: Ghost did not respond HTTP 200 on :2368" >&2
+              exit 1
+            fi
+            sleep 5
+          done
+
+          # ── Status summary ────────────────────────────────────────────────────
+          echo ""
+          echo "=== Stack status ==="
+          docker compose -f "$COMPOSE_FILE" ps
+          echo ""
+          echo "=== Deployed image digest ==="
+          docker inspect ghost --format='Image: {{.Config.Image}}  Digest: {{.Image}}'
+          SCRIPT
+
+          # Substitute the image placeholder (avoids heredoc escaping conflicts)
+          sed -i "s|__TARGET_IMAGE__|${TARGET_IMAGE}|g" /tmp/deploy.sh
+
+          # Base64-encode for clean SSM transport
+          ENCODED=$(base64 -w0 /tmp/deploy.sh)
+          echo "encoded=$ENCODED" >> "$GITHUB_OUTPUT"
+
+      - name: Send deployment command via SSM
         id: ssm
         run: |
+          # Decode on the remote side and execute — avoids all quoting issues
           COMMAND_ID=$(aws ssm send-command \
             --instance-ids "${{ steps.instance.outputs.instance_id }}" \
             --document-name "AWS-RunShellScript" \
-            --parameters 'commands=["systemctl restart ghost"]' \
-            --comment "GitHub Actions deploy — run ${{ github.run_id }} by ${{ github.actor }}" \
+            --parameters "commands=[\"echo '${{ steps.script.outputs.encoded }}' | base64 -d | bash\"]" \
+            --comment "GitHub Actions deploy run=${{ github.run_id }} actor=${{ github.actor }} image=${{ steps.image.outputs.tag }}" \
+            --timeout-seconds 600 \
             --query "Command.CommandId" \
             --output text)
 
           echo "command_id=$COMMAND_ID" >> "$GITHUB_OUTPUT"
           echo "SSM command sent: $COMMAND_ID"
 
-      # ── 4. Wait for SSM command to complete ─────────────────────────────────
+      # ── 5. Wait for SSM command and surface output ────────────────────────────
       - name: Wait for SSM command
         run: |
           aws ssm wait command-executed \
@@ -107,29 +233,50 @@ jobs:
           echo "SSM command status: $STATUS"
           [ "$STATUS" = "Success" ] || exit 1
 
-      # ── 5. Health check — wait for Ghost to serve HTTP 200 ──────────────────
-      - name: Wait for Ghost to become healthy
+      - name: Show SSM output
+        if: always()
         run: |
-          echo "Waiting for Ghost to come back up at ${{ secrets.GHOST_URL }}..."
+          echo "=== STDOUT ==="
+          aws ssm get-command-invocation \
+            --command-id "${{ steps.ssm.outputs.command_id }}" \
+            --instance-id "${{ steps.instance.outputs.instance_id }}" \
+            --query "StandardOutputContent" --output text || true
+
+          echo "=== STDERR ==="
+          aws ssm get-command-invocation \
+            --command-id "${{ steps.ssm.outputs.command_id }}" \
+            --instance-id "${{ steps.instance.outputs.instance_id }}" \
+            --query "StandardErrorContent" --output text || true
+
+      # ── 6. External health check — Ghost through Nginx/TLS ───────────────────
+      #    This is the production equivalent of CI's localhost:2368 curl check.
+      #    Validates the full stack: Ghost → Nginx → TLS → public DNS → HTTP 200
+      - name: Wait for Ghost to become healthy (external via GHOST_URL)
+        run: |
+          echo "Checking ${{ secrets.GHOST_URL }} through Nginx/TLS..."
           for i in $(seq 1 24); do
             CODE=$(curl -sf -o /dev/null -w "%{http_code}" \
               --max-time 10 "${{ secrets.GHOST_URL }}/" 2>/dev/null || echo "000")
             echo "[$i/24] HTTP $CODE"
-            [ "$CODE" = "200" ] && { echo "Ghost is healthy."; exit 0; }
+            [ "$CODE" = "200" ] && { echo "Ghost is healthy (external)."; exit 0; }
             sleep 10
           done
-          echo "ERROR: Ghost did not respond HTTP 200 within 4 minutes." >&2
+          echo "ERROR: Ghost did not respond HTTP 200 at ${{ secrets.GHOST_URL }} within 4 minutes." >&2
           exit 1
 
-      # ── 6. Job summary ───────────────────────────────────────────────────────
+      # ── 7. Job summary ────────────────────────────────────────────────────────
       - name: Write job summary
         if: always()
         run: |
+          MODE="Rolling restart"
+          [ -n "${{ inputs.rollback_tag }}" ] && MODE="Rollback to ${{ inputs.rollback_tag }}"
           {
             echo "## Deploy — Ghost Blog"
             echo ""
             echo "| Field | Value |"
             echo "| --- | --- |"
+            echo "| Mode | $MODE |"
+            echo "| Image | \`${{ steps.image.outputs.image }}\` |"
             echo "| Instance | \`${{ steps.instance.outputs.instance_id }}\` |"
             echo "| URL | ${{ secrets.GHOST_URL }} |"
             echo "| Triggered by | @${{ github.actor }} |"

@@ -1,14 +1,14 @@
 # ── Route 53 Hosted Zone ──────────────────────────────────────────────────────
 resource "aws_route53_zone" "main" {
-  name = "atechbroe.com"
+  name = "jenom.com"
 
-  tags = { Name = "atechbroe.com" }
+  tags = { Name = "jenom.com" }
 }
 
 # ── A records — root + www ─────────────────────────────────────────────────────
 resource "aws_route53_record" "root" {
   zone_id = aws_route53_zone.main.zone_id
-  name    = "atechbroe.com"
+  name    = "jenom.com"
   type    = "A"
   ttl     = 300
   records = [aws_eip.ghost.public_ip]
@@ -16,7 +16,7 @@ resource "aws_route53_record" "root" {
 
 resource "aws_route53_record" "www" {
   zone_id = aws_route53_zone.main.zone_id
-  name    = "www.atechbroe.com"
+  name    = "www.jenom.com"
   type    = "A"
   ttl     = 300
   records = [aws_eip.ghost.public_ip]
@@ -25,13 +25,13 @@ resource "aws_route53_record" "www" {
 # ── CAA — restrict SSL issuance to Let's Encrypt only ─────────────────────────
 resource "aws_route53_record" "caa" {
   zone_id = aws_route53_zone.main.zone_id
-  name    = "atechbroe.com"
+  name    = "jenom.com"
   type    = "CAA"
   ttl     = 3600
   records = [
     "0 issue \"letsencrypt.org\"",
     "0 issuewild \"letsencrypt.org\"",
-    "0 iodef \"mailto:admin@atechbroe.com\"",
+    "0 iodef \"mailto:admin@jenom.com\"",
   ]
 }
 

@@ -31,7 +31,7 @@ A self-hosted [Ghost 6](https://ghost.org/) blog deployed to AWS EC2 via Docker,
 | **Hosting** | AWS EC2 (Amazon Linux 2023) |
 | **Infra-as-Code** | Terraform ≥ 1.7 |
 | **CI/CD** | GitHub Actions |
-| **DNS** | AWS Route 53 (`atechbroe.com`) |
+| **DNS** | AWS Route 53 (`jenom.com`) |
 
 ---
 
@@ -145,7 +145,7 @@ docker build -t atechbroe-blog .
                 ┌──────────────────────────────────┐
                 │           AWS Account            │
                 │                                  │
-  Internet ────▶│  Route 53 (atechbroe.com)        │
+  Internet ────▶│  Route 53 (jenom.com)        │
                 │       │ A record → EIP           │
                 │       ▼                          │
                 │  Elastic IP ──▶ EC2 (AL2023)     │
@@ -237,7 +237,7 @@ Merge to main
         ├── SSM send-command: systemctl restart ghost
         │     └── ExecStartPre pulls latest Docker Hub image
         ├── Wait for SSM command: Success
-        └── Health check: HTTP 200 on atechbroe.com
+        └── Health check: HTTP 200 on jenom.com
 ```
 
 ### Manual dispatch only
@@ -252,7 +252,7 @@ Actions → Deploy — Rolling Restart → Run workflow
   └── atechbroe-deploy.yml
         input: force = true  →  restart regardless of new image
 
-Actions → DNS — Update atechbroe.com → Run workflow
+Actions → DNS — Update jenom.com → Run workflow
   └── atechbroe-dns.yml
         inputs: server_ip / ttl / dry_run
 ```
@@ -288,7 +288,7 @@ aws ssm start-session --target <instance-id> --region us-east-1
 # Issue the certificate
 sudo docker compose -f /opt/ghost/docker-compose.yml run --rm certbot \
   certonly --webroot -w /var/www/certbot \
-  -d atechbroe.com -d www.atechbroe.com \
+  -d jenom.com -d www.jenom.com \
   --email you@example.com --agree-tos
 ```
 
@@ -304,7 +304,7 @@ Certbot auto-renews every 12 hours via its built-in loop.
 
 ## DNS Management
 
-Run the `atechbroe-dns.yml` workflow manually from **Actions → DNS — Update atechbroe.com → Run workflow** whenever the server IP changes (e.g. after EC2 replacement).
+Run the `atechbroe-dns.yml` workflow manually from **Actions → DNS — Update jenom.com → Run workflow** whenever the server IP changes (e.g. after EC2 replacement).
 
 | Input | Description |
 | --- | --- |
@@ -312,7 +312,7 @@ Run the `atechbroe-dns.yml` workflow manually from **Actions → DNS — Update 
 | `ttl` | DNS TTL in seconds (`60` / `300` / `3600`). Use `60` during migrations. |
 | `dry_run` | Preview changes without applying. |
 
-The workflow validates the IP, upserts both `atechbroe.com` and `www.atechbroe.com` A records, waits for Route 53 propagation, and verifies resolution from Google, Cloudflare, and Quad9.
+The workflow validates the IP, upserts both `jenom.com` and `www.jenom.com` A records, waits for Route 53 propagation, and verifies resolution from Google, Cloudflare, and Quad9.
 
 ---
 
@@ -347,10 +347,10 @@ Go to **Settings → Secrets and variables → Actions** and add:
 | `AWS_SECRET_ACCESS_KEY` | Secret access key from the step above |
 | `AWS_REGION` | `us-east-1` |
 | `DYNAMOTBALE_TF` | DynamoDB table name for Terraform state locking |
-| `GHOST_URL` | `https://atechbroe.com` |
+| `GHOST_URL` | `https://jenom.com` |
 | `DOCKERHUB_USERNAME` | Docker Hub username |
 | `DOCKERHUB_TOKEN` | Docker Hub personal access token (not your password) |
-| `ROUTE53_ZONE_ID` | Route 53 hosted zone ID for `atechbroe.com` |
+| `ROUTE53_ZONE_ID` | Route 53 hosted zone ID for `jenom.com` |
 | `SERVER_IP` | Current server Elastic IP (fallback for DNS workflow) |
 
 ---
