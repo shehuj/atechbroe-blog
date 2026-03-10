@@ -2,12 +2,12 @@ name: Terraform — Deploy Ghost to EC2
 
 on:
   push:
-    branches: ["main"]
+    branches: ["main", "dev"]
     paths: ["terraform/**"]
   pull_request:
-    branches: ["main"]
+    branches: ["main", "dev"]
     paths: ["terraform/**"]
-  workflow_dispatch: allow manual runs
+  workflow_dispatch: # allow manual runs
 
 concurrency:
   group: terraform-${{ github.ref }}
@@ -62,7 +62,7 @@ jobs:
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: |
           terraform init \
-            -backend-config="bucket=${{ secrets.BACKEN_TF }}" \
+            -backend-config="bucket=${{ secrets.BACKEND_TF }}" \
             -backend-config="region=${{ secrets.AWS_REGION }}" \
             -backend-config="dynamodb_table=${{ secrets.DYNAMOTBALE_TF }}"
 
@@ -129,11 +129,12 @@ jobs:
     needs: plan
     if: |
       github.event_name != 'pull_request' &&
+      github.ref == 'refs/heads/main' &&
       needs.plan.outputs.plan_exit_code != '0'
 
     environment:
       name: production
-      url: ${{ secrets.TF_VAR_GHOST_URL }}
+      url: https://atechbroe.com
 
     steps:
       - uses: actions/checkout@v4
@@ -142,7 +143,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region:     ${{ secrets.TF_VAR_AWS_REGION }}
+          aws-region:     ${{ secrets.AWS_REGION }}
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v3

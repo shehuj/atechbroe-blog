@@ -2,8 +2,8 @@
 # =============================================================================
 # Ghost Blog — EC2 Bootstrap Script
 # Processed by Terraform templatefile(). Escaping rules:
-#   $${VAR}   → becomes ${VAR} in the final script (Terraform escape)
-#   ${tf_var} → replaced by Terraform with the actual value
+#   $${VAR}   → becomes $${VAR} in the final script (Terraform escape)
+#   $${tf_var} → replaced by Terraform with the actual value
 #   $VAR      → plain bash variable, Terraform ignores
 # =============================================================================
 set -euo pipefail
@@ -121,21 +121,21 @@ server {
 NGINX
 
 # ── 7. docker-compose.yml ─────────────────────────────────────────────────────
-# Uses ${VAR} references — Docker Compose reads values from /opt/ghost/.env
+# Uses $${VAR} references — Docker Compose reads values from /opt/ghost/.env
 cat > /opt/ghost/docker-compose.yml << 'COMPOSE'
 services:
 
   ghost:
-    image: ${GHOST_IMAGE}
+    image: $${GHOST_IMAGE}
     restart: always
     environment:
-      url: ${GHOST_URL}
+      url: $${GHOST_URL}
       database__client: mysql
       database__connection__host: db
       database__connection__port: 3306
       database__connection__database: ghost
       database__connection__user: ghost
-      database__connection__password: ${DB_PASSWORD}
+      database__connection__password: $${DB_PASSWORD}
     volumes:
       - ./content:/var/lib/ghost/content
     networks:
@@ -146,8 +146,8 @@ services:
     logging:
       driver: awslogs
       options:
-        awslogs-region: ${AWS_REGION}
-        awslogs-group: ${LOG_GROUP}
+        awslogs-region: $${AWS_REGION}
+        awslogs-group: $${LOG_GROUP}
         awslogs-stream: ghost
 
   db:
@@ -156,8 +156,8 @@ services:
     environment:
       MYSQL_DATABASE: ghost
       MYSQL_USER: ghost
-      MYSQL_PASSWORD: ${DB_PASSWORD}
-      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MYSQL_PASSWORD: $${DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: $${DB_ROOT_PASSWORD}
     volumes:
       - ./mysql:/var/lib/mysql
     networks:
@@ -171,8 +171,8 @@ services:
     logging:
       driver: awslogs
       options:
-        awslogs-region: ${AWS_REGION}
-        awslogs-group: ${LOG_GROUP}
+        awslogs-region: $${AWS_REGION}
+        awslogs-group: $${LOG_GROUP}
         awslogs-stream: db
 
   nginx:
@@ -192,8 +192,8 @@ services:
     logging:
       driver: awslogs
       options:
-        awslogs-region: ${AWS_REGION}
-        awslogs-group: ${LOG_GROUP}
+        awslogs-region: $${AWS_REGION}
+        awslogs-group: $${LOG_GROUP}
         awslogs-stream: nginx
 
   certbot:
