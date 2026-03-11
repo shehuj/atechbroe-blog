@@ -149,7 +149,7 @@ resource "aws_iam_role_policy" "kms_decrypt" {
     Statement = [{
       Effect   = "Allow"
       Action   = ["kms:Decrypt", "kms:GenerateDataKey"]
-      Resource = [aws_kms_key.ebs.arn, aws_kms_key.secrets.arn]
+      Resource = [aws_kms_key.ebs.arn, aws_kms_key.secrets.arn, aws_kms_key.logs.arn]
     }]
   })
 }
