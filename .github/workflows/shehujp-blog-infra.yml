@@ -1,13 +1,15 @@
-name: Terraform — Plan (PR) / Apply (manual)
+name: Terraform — Plan (PR) / Apply (PR to main) / Apply (manual)
 
 on:
-  # Plan runs on every PR — shows infra diff before merge
+  # Every PR gets a plan posted as a comment.
+  # PRs targeting main also get an apply + infrastructure validation so infra
+  # is fully provisioned before the PR is merged and deploy fires.
   pull_request:
     branches: ["main", "dev"]
     paths:
       - "terraform/**"
       - ".github/workflows/shehujp-blog-infra.yml"
-  # Apply is manual only — infra changes are intentional, not automatic
+  # Manual dispatch — kept for emergency re-applies and targeted plans.
   workflow_dispatch:
     inputs:
       action:
@@ -23,16 +25,15 @@ concurrency:
 
 permissions:
   contents: read
-  pull-requests: write # allows posting the plan as a PR comment
+  pull-requests: write # post plan diff as PR comment
 
 env:
   TF_VERSION: "1.7.5"
   TF_WORKING_DIR: terraform
-  # Terraform variables — sourced from GitHub secrets
-  TF_VAR_aws_region:    ${{ secrets.AWS_REGION }}
-  TF_VAR_ghost_url:     ${{ secrets.GHOST_URL }}
-  TF_VAR_ghost_image:   ${{ secrets.DOCKERHUB_USERNAME }}/shehujp-blog:latest
-  TF_VAR_environment:   production
+  TF_VAR_aws_region:  ${{ secrets.AWS_REGION }}
+  TF_VAR_ghost_url:   ${{ secrets.GHOST_URL }}
+  TF_VAR_ghost_image: ${{ secrets.DOCKERHUB_USERNAME }}/shehujp-blog:latest
+  TF_VAR_environment: production
 
 jobs:
 
@@ -96,7 +97,6 @@ jobs:
           path: ${{ env.TF_WORKING_DIR }}/tfplan
           retention-days: 1
 
-      # Post plan diff as a PR comment
       - name: Comment plan on PR
         if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
@@ -109,8 +109,12 @@ jobs:
               ? plan.slice(0, maxLen) + '\n\n... (truncated)'
               : plan;
             const fmtStatus = '${{ steps.fmt.outcome }}' === 'success' ? '✅' : '⚠️';
+            const willApply = '${{ github.base_ref }}' === 'main';
+            const applyNote = willApply
+              ? '\n\n> ⚡ **This PR targets `main` — changes will be applied automatically after plan succeeds.**'
+              : '\n\n> ℹ️ This PR targets `dev` — plan only, no apply.';
             const body = `## Terraform Plan
-            **Format**: ${fmtStatus}
+            **Format**: ${fmtStatus}${applyNote}
 
             <details><summary>Show Plan</summary>
 
@@ -129,13 +133,25 @@ jobs:
         if: steps.plan.outputs.exit_code == '1'
         run: exit 1
 
-# ── 2. Apply (main branch only) ───────────────────────────────────────────────
+# ── 2. Apply ──────────────────────────────────────────────────────────────────
+#    Runs automatically on PRs to main when the plan shows changes (exit_code=2).
+#    Also runs on manual dispatch with action=apply.
+#    Gated behind the production environment for human approval.
   apply:
     name: Terraform Apply
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: plan
-    if: github.event_name == 'workflow_dispatch' && inputs.action == 'apply'
+    if: |
+      (
+        github.event_name == 'pull_request' &&
+        github.base_ref == 'main' &&
+        needs.plan.outputs.plan_exit_code == '2'
+      ) ||
+      (
+        github.event_name == 'workflow_dispatch' &&
+        inputs.action == 'apply'
+      )
 
     environment:
       name: production
@@ -177,3 +193,146 @@ jobs:
       - name: Print outputs
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: terraform output -no-color
+
+# ── 3. Validate — verify provisioned resources are healthy ────────────────────
+#    Runs after every successful apply. Checks:
+#      a) EC2 instance reached running state
+#      b) SSM agent registered and online
+#      c) Ghost stack responds HTTP 200 internally
+  validate:
+    name: Validate Infrastructure
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: apply
+    if: needs.apply.result == 'success'
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ secrets.AWS_REGION }}
+
+      # ── a) Wait for EC2 to reach running state ────────────────────────────────
+      - name: Wait for EC2 instance running
+        id: instance
+        run: |
+          echo "Waiting for EC2 instance to reach running state..."
+          for i in $(seq 1 24); do
+            INSTANCE_ID=$(aws ec2 describe-instances \
+              --filters \
+                "Name=tag:Environment,Values=production" \
+                "Name=instance-state-name,Values=running" \
+              --query "Reservations[].Instances[].InstanceId | [0]" \
+              --output text 2>/dev/null || true)
+
+            if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" = "None" ]; then
+              INSTANCE_ID=$(aws ec2 describe-instances \
+                --filters \
+                  "Name=tag:Name,Values=ghost-blog-production" \
+                  "Name=instance-state-name,Values=running" \
+                --query "Reservations[].Instances[].InstanceId | [0]" \
+                --output text 2>/dev/null || true)
+            fi
+
+            if [ -n "$INSTANCE_ID" ] && [ "$INSTANCE_ID" != "None" ]; then
+              echo "Instance running: $INSTANCE_ID"
+              echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
+              break
+            fi
+
+            echo "[$i/24] Waiting for instance to be running..."
+            if [ "$i" -eq 24 ]; then
+              echo "::error::EC2 instance did not reach running state within 4 minutes."
+              exit 1
+            fi
+            sleep 10
+          done
+
+      # ── b) Wait for SSM agent to register ────────────────────────────────────
+      - name: Wait for SSM agent online
+        run: |
+          echo "Waiting for SSM agent on ${{ steps.instance.outputs.instance_id }}..."
+          for i in $(seq 1 24); do
+            STATUS=$(aws ssm describe-instance-information \
+              --filters "Key=InstanceIds,Values=${{ steps.instance.outputs.instance_id }}" \
+              --query "InstanceInformationList[0].PingStatus" \
+              --output text 2>/dev/null || true)
+
+            if [ "$STATUS" = "Online" ]; then
+              echo "SSM agent is online."
+              break
+            fi
+
+            echo "[$i/24] SSM status: ${STATUS:-not yet registered}"
+            if [ "$i" -eq 24 ]; then
+              echo "::error::SSM agent did not come online within 4 minutes."
+              exit 1
+            fi
+            sleep 10
+          done
+
+      # ── c) Verify Ghost stack via SSM ─────────────────────────────────────────
+      #    Runs on the instance: checks docker compose ps and internal HTTP.
+      #    Ghost may still be initialising (userdata runs at boot) so we allow
+      #    up to 5 minutes for the stack to become healthy.
+      - name: Verify Ghost stack health via SSM
+        run: |
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "${{ steps.instance.outputs.instance_id }}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=[
+              "set -euo pipefail",
+              "echo === Docker stack status ===",
+              "docker compose -f /opt/ghost/docker-compose.yml ps 2>/dev/null || echo (stack not yet started)",
+              "echo === Waiting for Ghost HTTP 200 ===",
+              "for i in $(seq 1 30); do CODE=$(curl -sf -o /dev/null -w \"%{http_code}\" --max-time 5 http://localhost:2368/ 2>/dev/null || echo 000); echo \"[$i/30] HTTP $CODE\"; [ \"$CODE\" = \"200\" ] && { echo Ghost is healthy.; exit 0; }; sleep 10; done; echo ERROR: Ghost did not respond within 5 minutes. >&2; exit 1"
+            ]' \
+            --comment "infra-validate run=${{ github.run_id }}" \
+            --timeout-seconds 360 \
+            --query "Command.CommandId" \
+            --output text)
+
+          echo "SSM command: $COMMAND_ID"
+
+          aws ssm wait command-executed \
+            --command-id "$COMMAND_ID" \
+            --instance-id "${{ steps.instance.outputs.instance_id }}"
+
+          STATUS=$(aws ssm get-command-invocation \
+            --command-id "$COMMAND_ID" \
+            --instance-id "${{ steps.instance.outputs.instance_id }}" \
+            --query "Status" --output text)
+
+          echo "--- STDOUT ---"
+          aws ssm get-command-invocation \
+            --command-id "$COMMAND_ID" \
+            --instance-id "${{ steps.instance.outputs.instance_id }}" \
+            --query "StandardOutputContent" --output text || true
+
+          echo "--- STDERR ---"
+          aws ssm get-command-invocation \
+            --command-id "$COMMAND_ID" \
+            --instance-id "${{ steps.instance.outputs.instance_id }}" \
+            --query "StandardErrorContent" --output text || true
+
+          [ "$STATUS" = "Success" ] || exit 1
+
+      # ── Summary ───────────────────────────────────────────────────────────────
+      - name: Write validation summary
+        if: always()
+        run: |
+          STATUS="${{ job.status }}"
+          ICON=$([ "$STATUS" = "success" ] && echo "✅" || echo "❌")
+          {
+            echo "## Infrastructure Validation — ${ICON} ${STATUS}"
+            echo ""
+            echo "| Check | Result |"
+            echo "| --- | --- |"
+            echo "| EC2 instance running | ${ICON} \`${{ steps.instance.outputs.instance_id }}\` |"
+            echo "| SSM agent online | ${ICON} |"
+            echo "| Ghost HTTP 200 (internal) | ${ICON} |"
+            echo ""
+            echo "**Triggered by:** @${{ github.actor }}"
+          } >> "$GITHUB_STEP_SUMMARY"
