@@ -11,11 +11,8 @@ on:
       - ".github/workflows/ghost-CI.yml"
   pull_request:
     branches: ["main", "dev"]
-    paths:
-      - "Dockerfile"
-      - "docker-compose.yml"
-      - ".trivyignore"
-      - ".github/workflows/ghost-CI.yml"
+    # No path filter — build, test, and scan on every PR so the image is always
+    # validated before infra is provisioned and before merge triggers a deploy.
   workflow_dispatch:
     inputs:
       publish:

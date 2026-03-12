@@ -75,15 +75,16 @@ shehujp-blog/
 
 | Event | What runs | What doesn't run |
 | --- | --- | --- |
-| Push to `dev` | Build, test, scan | Publish, infra plan, deploy |
-| PR to `dev` / `main` | Build, test, scan, **Terraform plan** (posted as PR comment) | Publish, deploy |
+| Push to `dev` | Build, test, scan | Publish, infra, deploy |
+| PR to `dev` | Build, test, scan; **Terraform plan** (if `terraform/**` changed) | Publish, infra apply, deploy |
+| PR to `main` | Build, test, scan; **Terraform plan + apply + validate** (if `terraform/**` changed) | Publish, deploy |
 | Merge to `main` | Build, test, scan, **publish**, **rolling deploy** | Terraform apply |
 | `v*.*.*` tag | Build, test, scan, **publish** (semver tags) | Deploy, infra |
 | Manual dispatch | Any workflow individually, with control inputs | — |
 
-> Infra changes (Terraform apply) are **never automatic** — they require a manual dispatch with `action=apply`. This prevents unintended infrastructure changes from code-only merges.
+> **Infra is provisioned on PR to `main`** — the plan is posted as a comment, then applied after the production environment gate is approved. Infrastructure is ready before the merge triggers the deploy.
 
-> Open a PR to `main` to preview both CI results and the Terraform plan diff before merging.
+> PRs to `dev` only plan (no apply) — safe preview of Terraform diffs without touching production.
 
 ---
 
@@ -205,12 +206,12 @@ terraform apply
 
 ## CI/CD Pipeline
 
-### On pull request
+### On pull request to main
 
 ```text
-PR opened / updated
+PR opened / updated (targeting main)
   │
-  ├── ghost-CI.yml
+  ├── ghost-CI.yml  (every PR, no path filter)
   │     ├── build-and-test
   │     │     ├── Build image (GHA cache)
   │     │     ├── Start container (SQLite)
@@ -221,12 +222,18 @@ PR opened / updated
   │           ├── Rebuild for Trivy
   │           └── Trivy CRITICAL/HIGH scan (.trivyignore applied)
   │
-  └── shehujp-blog-infra.yml  (only when terraform/** or workflow file changes)
-        ├── terraform fmt -check
-        ├── terraform init
-        ├── terraform validate
-        ├── terraform plan  (-detailed-exitcode)
-        └── Post plan diff as PR comment
+  └── shehujp-blog-infra.yml  (when terraform/** or workflow file changes)
+        ├── plan
+        │     ├── terraform fmt -check
+        │     ├── terraform init / validate
+        │     ├── terraform plan  (-detailed-exitcode)
+        │     └── Post plan diff as PR comment
+        ├── apply  ← production environment gate (human approval)
+        │     └── terraform apply  (only when plan shows changes)
+        └── validate
+              ├── Wait for EC2 running state
+              ├── Wait for SSM agent online
+              └── SSM: verify Ghost HTTP 200 on :2368
 ```
 
 ### On merge to main
@@ -242,12 +249,23 @@ Merge to main
   │           └── Build & push multi-arch (amd64 + arm64)
   │                 Tags: :main  :sha-<commit>  :latest
   │
-  └── shehujp-blog-deploy.yml  (triggers when ghost-CI completes)
+  └── shehujp-blog-deploy.yml  (triggers when ghost-CI publish completes)
+        ├── Resolve image tag
         ├── Discover EC2 by Environment=production tag
-        ├── SSM send-command: systemctl restart ghost
-        │     └── ExecStartPre pulls latest Docker Hub image
+        ├── SSM send-command: pull + rolling restart + health checks
         ├── Wait for SSM command: Success
-        └── Health check: HTTP 200 on shehujp.com
+        └── External health check: HTTP 200 on shehujp.com
+```
+
+### On pull request to dev
+
+```text
+PR opened / updated (targeting dev)
+  │
+  ├── ghost-CI.yml  (every PR — build + test + scan, no publish)
+  │
+  └── shehujp-blog-infra.yml  (when terraform/** changes — plan only, no apply)
+        └── Post plan diff as PR comment
 ```
 
 ### Manual dispatch only
@@ -256,11 +274,11 @@ Merge to main
 Actions → Terraform — Plan / Apply → Run workflow
   └── shehujp-blog-infra.yml
         input: action = plan   →  plan only
-        input: action = apply  →  plan + apply  (production gate)
+        input: action = apply  →  plan + apply + validate  (production gate)
 
 Actions → Deploy — Rolling Restart → Run workflow
   └── shehujp-blog-deploy.yml
-        input: force = true  →  restart regardless of new image
+        input: rollback_tag  →  deploy a specific image tag
 
 Actions → DNS — Update shehujp.com → Run workflow
   └── shehujp-blog-dns.yml
@@ -271,9 +289,9 @@ Actions → DNS — Update shehujp.com → Run workflow
 
 | Workflow | Auto trigger | Manual inputs |
 | --- | --- | --- |
-| `ghost-CI.yml` | Push/PR to `dev`/`main`; semver tags | `publish` (bool), `skip_tests` (bool) |
-| `shehujp-blog-infra.yml` | PR to `dev`/`main` (terraform/** changes) | `action`: `plan` / `apply` |
-| `shehujp-blog-deploy.yml` | After `ghost-CI` succeeds on `main` | `force` (bool) |
+| `ghost-CI.yml` | Every PR to `dev`/`main`; push/tags on `main` | `publish` (bool), `skip_tests` (bool) |
+| `shehujp-blog-infra.yml` | PR to `main` (plan + apply + validate); PR to `dev` (plan only) | `action`: `plan` / `apply` |
+| `shehujp-blog-deploy.yml` | After `ghost-CI` publish succeeds on `main` | `rollback_tag` (string) |
 | `shehujp-blog-dns.yml` | Manual only | `server_ip`, `ttl`, `dry_run` |
 
 ### Docker image tags

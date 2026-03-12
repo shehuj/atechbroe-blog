@@ -1,6 +1,12 @@
 name: Deploy — Rolling Restart Ghost on EC2
 
-# Runs automatically after the Docker image is published to Docker Hub on main.
+# Pipeline position: fires AFTER merge to main.
+#
+#   PR opened  →  ghost-CI (build + test + scan)
+#              →  shehujp-blog-infra (plan + apply + validate)
+#   PR merged  →  ghost-CI (build + test + scan + publish to Docker Hub)
+#              →  THIS WORKFLOW (rolling restart on EC2 via SSM)
+#
 # Can also be triggered manually (e.g. after a hotfix, config change, or rollback).
 #
 # Pre-requisites (GitHub Secrets):
